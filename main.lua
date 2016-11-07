@@ -4,19 +4,14 @@ require 'os'
 require 'optim'
 -- require 'cunn'
 
-local optParser = require 'opts'
-local opt = optParser.parse(arg)
-
-
-print('opt is ', opt)
-
-
 local tnt = require 'torchnet'
-local model = require 'models/'.. opt.model
+local image = require 'image'
+local optParser = require 'opts'
 
-local DATA_PATH = '/home/anirudhan/workspace/traffic-sign-detection/data/'
 local WIDTH, HEIGHT = 32, 32
+local DATA_PATH = '/home/anirudhan/workspace/traffic-sign-detection/data/'
 
+local opt = optParser.parse(arg)
 
 torch.setdefaulttensortype('torch.DoubleTensor')
 
@@ -43,7 +38,7 @@ function getTrainSample(dataset, idx)
 end
 
 function getTrainLabel(dataset, idx)
-    return dataset[idx][9]
+    return torch.LongTensor{dataset[idx][9] + 1}
 end
 
 function getTestSample(dataset, idx)
@@ -53,27 +48,27 @@ function getTestSample(dataset, idx)
 end
 
 function getIterator(dataset)
-    return tnt.ParallelDatasetIterator{
-        nthreads = opt.nthreads,
-        init = function() require 'torchnet' end,
-        closure = function()
-            return tnt.BatchDataset{
-                batchsize = opt.batchsize,
-                dataset = dataset
-            }
-        end
+    return tnt.DatasetIterator{
+        dataset = tnt.BatchDataset{
+            batchsize = opt.batchsize,
+            dataset = dataset
+        }
     }
 end
 
+local trainData = torch.load(DATA_PATH..'train.t7')
+local testData = torch.load(DATA_PATH..'test.t7')
+
 trainDataset = tnt.SplitDataset{
     partitions = {train=0.9, val=0.1},
+    initialpartition = 'train',
     dataset = tnt.ShuffleDataset{
         dataset = tnt.ListDataset{
-            list = torch.range(1, train:size(1)):long(),
+            list = torch.range(1, trainData:size(1)):long(),
             load = function(idx)
                 return {
-                    input =  getTrainSample(train, idx),
-                    target = getTrainLabel(train, idx)
+                    input =  getTrainSample(trainData, idx),
+                    target = getTrainLabel(trainData, idx)
                 }
             end
         }
@@ -81,30 +76,62 @@ trainDataset = tnt.SplitDataset{
 }
 
 testDataset = tnt.ListDataset{
-    list = torch.range(1, test:size(1)):long(),
+    list = torch.range(1, testData:size(1)):long(),
     load = function(idx)
         return {
-            input = getTestSample(test, idx)
+            input = getTestSample(testData, idx)
         }
     end
 }
 
 
 local engine = tnt.OptimEngine()
-local meter = tnt.ClassErrorMeter{topk = {1}}
+local meter = tnt.AverageValueMeter()
+local criterion = nn.CrossEntropyCriterion()
+local model = require("models/".. opt.model)
+local clerr = tnt.ClassErrorMeter{topk = {1}}
+local batch = 1
+
+-- print(model)
 
 engine.hooks.onStartEpoch = function(state)
     meter:reset()
     clerr:reset()
+    batch = 1
 end
 
-engine:train{
-    network = model,
-    criterion = criterion,
-    iterator = iterator,
-    optimMethod = optim.sgd,
-    config = {
-        learningRate = opt.learningRate,
-        momentum = opt.momentum
+engine.hooks.onForwardCriterion = function(state)
+    meter:add(state.criterion.output)
+    clerr:add(state.network.output, state.sample.target)
+    print(string.format("Batch: %d/%d; avg. loss: %2.4f; avg. error: %2.4f", batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
+    batch = batch + 1 -- batch increment has to happen here to work for train, val and test.
+end
+
+engine.hooks.onEnd = function(state)
+    batch = 1
+end
+
+local epoch = 1
+
+while epoch <= opt.nEpochs do
+    trainDataset:select('train')
+    engine:train{
+        network = model,
+        criterion = criterion,
+        iterator = getIterator(trainDataset),
+        optimMethod = optim.sgd,
+        maxepoch = 1,
+        config = {
+            learningRate = opt.learningRate,
+            momentum = opt.momentum
+        }
     }
-}
+
+    trainDataset:select('val')
+    engine:test{
+        network = model,
+        criterion = criterion,
+        iterator = getIterator(trainDataset)
+    }
+    epoch = epoch + 1
+end
