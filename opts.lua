@@ -18,6 +18,7 @@ function M.parse(arg)
     cmd:option('-name',             '',             'name of the current training run')
     cmd:option('-manualSeed',       30,             'Manually set RNG seed')
     cmd:option('-model',            '',             'Model to use for training')
+    cmd:option('-verbose',          'false',        'Print stats for every batch')
 
     local opt = cmd:parse(arg or {})
 

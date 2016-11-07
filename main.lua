@@ -2,6 +2,7 @@ require 'torch'
 require 'optim'
 require 'os'
 require 'optim'
+require 'xlua'
 -- require 'cunn'
 
 local tnt = require 'torchnet'
@@ -94,27 +95,37 @@ local batch = 1
 
 -- print(model)
 
-engine.hooks.onStartEpoch = function(state)
+engine.hooks.onStart = function(state)
     meter:reset()
     clerr:reset()
     batch = 1
+    if state.training then
+        mode = 'Train'
+    else
+        mode = 'Val'
+    end
 end
 
 engine.hooks.onForwardCriterion = function(state)
     meter:add(state.criterion.output)
     clerr:add(state.network.output, state.sample.target)
-    print(string.format("Batch: %d/%d; avg. loss: %2.4f; avg. error: %2.4f", batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
+    if opt.verbose == true then
+        print(string.format("%s Batch: %d/%d; avg. loss: %2.4f; avg. error: %2.4f",mode, batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
+    else
+        xlua.progress(batch, state.iterator.dataset:size())
+    end
     batch = batch + 1 -- batch increment has to happen here to work for train, val and test.
 end
 
 engine.hooks.onEnd = function(state)
-    batch = 1
+    print(string.format("OnEnd %s: avg. loss: %2.4f; avg. error: %2.4f",mode, meter:value(), clerr:value{k = 1}))
 end
 
 local epoch = 1
 
 while epoch <= opt.nEpochs do
-    trainDataset:select('train')
+    -- trainDataset:select('train')
+    trainDataset:select('val')
     engine:train{
         network = model,
         criterion = criterion,
