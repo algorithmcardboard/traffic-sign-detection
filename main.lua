@@ -178,6 +178,7 @@ while epoch <= opt.nEpochs do
         criterion = criterion,
         iterator = getIterator(trainDataset)
     }
+    print('Done with Epoch '..tostring(epoch))
     epoch = epoch + 1
 end
 
