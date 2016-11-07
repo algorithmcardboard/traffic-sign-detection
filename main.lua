@@ -4,15 +4,20 @@ require 'os'
 require 'optim'
 require 'xlua'
 -- require 'cunn'
+-- require 'cudnn' -- faster convolutions
+
+--[[
+--  Hint:  Plot as much as you can.  
+--  Look into torch wiki for packages that can help you plot.
+--]]
 
 local tnt = require 'torchnet'
 local image = require 'image'
 local optParser = require 'opts'
+local opt = optParser.parse(arg)
 
 local WIDTH, HEIGHT = 32, 32
-local DATA_PATH = '/home/anirudhan/workspace/traffic-sign-detection/data/'
-
-local opt = optParser.parse(arg)
+local DATA_PATH = (opt.data ~= '' and opt.data or './data/')
 
 torch.setdefaulttensortype('torch.DoubleTensor')
 
@@ -49,6 +54,9 @@ function getTestSample(dataset, idx)
 end
 
 function getIterator(dataset)
+    --[[
+    -- Hint:  Use ParallelIterator for using multiple CPU cores
+    --]]
     return tnt.DatasetIterator{
         dataset = tnt.BatchDataset{
             batchsize = opt.batchsize,
@@ -63,6 +71,12 @@ local testData = torch.load(DATA_PATH..'test.t7')
 trainDataset = tnt.SplitDataset{
     partitions = {train=0.9, val=0.1},
     initialpartition = 'train',
+    --[[
+    --  Hint:  Use a resampling strategy that keeps the 
+    --  class distribution even during initial training epochs 
+    --  and then slowly converges to the actual distribution 
+    --  in later stages of training.
+    --]]
     dataset = tnt.ShuffleDataset{
         dataset = tnt.ListDataset{
             list = torch.range(1, trainData:size(1)):long(),
@@ -80,17 +94,22 @@ testDataset = tnt.ListDataset{
     list = torch.range(1, testData:size(1)):long(),
     load = function(idx)
         return {
-            input = getTestSample(testData, idx)
+            input = getTestSample(testData, idx),
+            sampleId = torch.LongTensor{testData[idx][1]}
         }
     end
 }
 
 
+--[[
+-- Hint:  Use :cuda to convert your model to use GPUs
+--]]
+local model = require("models/".. opt.model)
 local engine = tnt.OptimEngine()
 local meter = tnt.AverageValueMeter()
 local criterion = nn.CrossEntropyCriterion()
-local model = require("models/".. opt.model)
 local clerr = tnt.ClassErrorMeter{topk = {1}}
+local timer = tnt.TimeMeter()
 local batch = 1
 
 -- print(model)
@@ -98,6 +117,7 @@ local batch = 1
 engine.hooks.onStart = function(state)
     meter:reset()
     clerr:reset()
+    timer:reset()
     batch = 1
     if state.training then
         mode = 'Train'
@@ -106,26 +126,35 @@ engine.hooks.onStart = function(state)
     end
 end
 
+--[[
+-- Hint:  Use onSample function to convert to 
+--        cuda tensor for using GPU
+--]]
+-- engine.hooks.onSample = function(state)
+-- end
+
 engine.hooks.onForwardCriterion = function(state)
     meter:add(state.criterion.output)
     clerr:add(state.network.output, state.sample.target)
     if opt.verbose == true then
-        print(string.format("%s Batch: %d/%d; avg. loss: %2.4f; avg. error: %2.4f",mode, batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
+        print(string.format("%s Batch: %d/%d; avg. loss: %2.4f; avg. error: %2.4f",
+                mode, batch, state.iterator.dataset:size(), meter:value(), clerr:value{k = 1}))
     else
         xlua.progress(batch, state.iterator.dataset:size())
     end
     batch = batch + 1 -- batch increment has to happen here to work for train, val and test.
+    timer:incUnit()
 end
 
 engine.hooks.onEnd = function(state)
-    print(string.format("OnEnd %s: avg. loss: %2.4f; avg. error: %2.4f",mode, meter:value(), clerr:value{k = 1}))
+    print(string.format("%s: avg. loss: %2.4f; avg. error: %2.4f, time: %2.4f",
+    mode, meter:value(), clerr:value{k = 1}, timer:value()))
 end
 
 local epoch = 1
 
 while epoch <= opt.nEpochs do
-    -- trainDataset:select('train')
-    trainDataset:select('val')
+    trainDataset:select('train')
     engine:train{
         network = model,
         criterion = criterion,
@@ -133,7 +162,7 @@ while epoch <= opt.nEpochs do
         optimMethod = optim.sgd,
         maxepoch = 1,
         config = {
-            learningRate = opt.learningRate,
+            learningRate = opt.LR,
             momentum = opt.momentum
         }
     }
@@ -146,3 +175,33 @@ while epoch <= opt.nEpochs do
     }
     epoch = epoch + 1
 end
+
+local submission = assert(io.open(opt.logDir .. "/submission.csv", "w"))
+submission:write("Filename,ClassId\n")
+batch = 1
+
+--[[
+--  This piece of code creates the submission
+--  file that has to be uploaded in kaggle.
+--]]
+engine.hooks.onForward = function(state)
+    local fileNames  = state.sample.sampleId
+    local _, pred = state.network.output:max(2)
+    pred = pred - 1
+    for i = 1, pred:size(1) do
+        submission:write(string.format("%05d,%d\n", fileNames[i][1], pred[i][1]))
+    end
+    xlua.progress(batch, state.iterator.dataset:size())
+    batch = batch + 1
+end
+
+engine.hooks.onEnd = function(state)
+    submission:close()
+end
+
+engine:test{
+    network = model,
+    iterator = getIterator(testDataset)
+}
+
+print("The End!")
