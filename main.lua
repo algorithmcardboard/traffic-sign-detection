@@ -29,6 +29,11 @@ function resize(img)
     return image.scale(img, WIDTH,HEIGHT)
 end
 
+--[[
+-- Hint:  Should we add some more transforms? shifting, scaling?
+-- Should all images be of size 32x32?  Are we losing 
+-- information by resizing bigger images to a smaller size?
+--]]
 function transformInput(inp)
     f = tnt.transform.compose{
         [1] = resize
